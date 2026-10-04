@@ -18,7 +18,7 @@ prompt), the prompt only shows `[Image #1]`. This mod draws the picture:
 | Where | What you get |
 | --- | --- |
 | kitty, Ghostty | real pixels (kitty graphics protocol) |
-| iTerm2, WezTerm, VS Code, Alacritty… | block glyphs fitted to the picture (`▁▂▃▄▌▖▗▘▝▚`…), chafa-style: each cell picks the glyph and two colors that match its 4×8 sub-pixels best |
+| iTerm2, Windows Terminal, WezTerm, VS Code, Alacritty… | block glyphs fitted to the picture (`▁▂▃▄▌▖▗▘▝▚`…), chafa-style: each cell picks the glyph and two colors that match its 4×8 sub-pixels best |
 | Terminal.app | half blocks (`▄`): it draws block glyphs from the font, which leaves gaps |
 | Claude desktop app (Code tab) | the gallery pane, as an image |
 
@@ -36,7 +36,8 @@ Pick the terminal renderer with the `renderer` option: `auto` (default),
 - macOS: nothing to install (uses `sips` and `osascript`).
 - Linux: ImageMagick (`magick` or `convert`); `wl-paste` or `xclip` for the
   clipboard fallback.
-- Windows: not supported yet.
+- Windows: nothing to install (uses Windows PowerShell and its built-in
+  System.Drawing). Windows support is new: please report what you see.
 
 ## Install
 
@@ -63,14 +64,16 @@ To try a local copy without installing it: `claude --plugin-dir <folder>`.
   200 ms: thumbnails appear as soon as you paste.
 - Claude Code stores each pasted image under
   `/tmp/claude-<uid>/<project>/<session>/images/<n>.png` (`$CLAUDE_CODE_TMPDIR`
-  in place of `/tmp` when set). When `[Image #n]` appears in the prompt, the
+  in place of `/tmp` when set). On Windows the mod looks for that folder in
+  the temp folders (`%TEMP%` and its `claude*` folders). When `[Image #n]` appears in the prompt, the
   mod picks that file up, so the preview shows exactly what Claude will
   receive. If it never appears, the mod reads the clipboard (a file copied in
   the Finder is read from disk, not as its icon).
 - Every image that reaches the conversation (`session.append`) is added to
   the gallery, whichever surface it came from.
 - Copies for display (a PNG, a BMP for the block renderer, a small JPEG for
-  the desktop) go to `$TMPDIR/claude-image-preview/<session>/` and are deleted
+  the desktop) go to `$TMPDIR/claude-image-preview/<session>/` (`%TEMP%` on
+  Windows) and are deleted
   when the session ends or is cleared.
 
 Nothing leaves your machine: the mod runs only local commands.
@@ -78,15 +81,20 @@ Nothing leaves your machine: the mod runs only local commands.
 ## Files
 
 ```
-.claude-plugin/plugin.json   manifest and options
-hooks/hooks.json             points at the hooks module
-hooks/register.tsx           the hooks: capture, band, gallery, /images
-hooks/host.ts                the commands run on the machine (sips, ImageMagick, clipboard)
-hooks/pixels.ts              BMP decoding and half-block cells
-types/index.d.ts             the mod's state contract
+.claude-plugin/plugin.json       manifest and options
+.claude-plugin/marketplace.json  the marketplace this repository is
+hooks/hooks.json                 points at the hooks module
+hooks/register.tsx               the hooks: capture, band, gallery, /images
+hooks/host.ts                    the commands run on the machine (sips, ImageMagick, PowerShell)
+hooks/pixels.ts                  BMP decoding and block-glyph cells
+types/index.d.ts                 the mod's state contract
+tests/image-preview.test.ts      tests run by `claude plugin test .`
+scripts/check-host.ts            runs the real commands on this machine
 ```
 
-Check it with `claude plugin validate .`.
+Check it with `claude plugin validate .` and `claude plugin test .`. The
+commands the mod runs on each system are checked for real, on Windows, macOS
+and Linux, by `scripts/check-host.ts` (GitHub Actions: `.github/workflows/check.yml`).
 
 ## Credits
 
@@ -106,5 +114,5 @@ MIT
 Un mod Claude Code qui affiche les images que vous collez : une vignette
 au-dessus du prompt pour chaque `[Image #n]` avant l'envoi, et une galerie de
 toutes les images de la session avec `/images`. Vrais pixels dans kitty et
-Ghostty, caractères de blocs ajustés à l'image ailleurs. macOS sans
-dépendance ; Linux avec ImageMagick.
+Ghostty, caractères de blocs ajustés à l'image ailleurs. macOS et
+Windows sans dépendance ; Linux avec ImageMagick.

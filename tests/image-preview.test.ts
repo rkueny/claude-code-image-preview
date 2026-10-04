@@ -1,5 +1,6 @@
 import { expect, mock, test } from 'claude-code/testing'
 
+import { isOwnWork, measureCmd, parseMeasure, projectFolder, windowsTempRoots } from '../hooks/host'
 import { boxFor, decodeBmp, fitCells, fitRow } from '../hooks/pixels'
 
 /** A 24-bit top-down BMP, `w × h`, a gold square on a dark ground. */
@@ -109,4 +110,76 @@ test('a pasted image shows framed above the prompt, and goes when the prompt is 
   await clock.advance(200)
   const after = await $.ui.mount({ ...BAND, surface: 'terminal' })
   expect(await after.find({ type: 'Raster' })).toBeUndefined()
+})
+
+/** The script a PowerShell command runs, decoded from its -EncodedCommand. */
+function scriptOf(argv: readonly string[]) {
+  const bin = atob(argv[argv.length - 1] ?? '')
+  let out = ''
+  for (let i = 0; i < bin.length; i += 2) out += String.fromCharCode(bin.charCodeAt(i) | (bin.charCodeAt(i + 1) << 8))
+
+  return out
+}
+
+test('Windows: PowerShell commands carry their paths in variables, not in the script', async () => {
+  const cmd = measureCmd('gdi', 'C:/Users/me/AppData/Local/Temp/claude/C--work/s/images/1.png')
+  expect(cmd?.argv[0]).toBe('powershell.exe')
+  expect(cmd?.env).toEqual({ IP_IN: 'C:/Users/me/AppData/Local/Temp/claude/C--work/s/images/1.png' })
+  expect(scriptOf(cmd?.argv ?? [])).toContain('[System.Drawing.Image]::FromFile($env:IP_IN)')
+  expect(parseMeasure('gdi', 'pixelWidth: 1092\r\npixelHeight: 410\r\n')).toEqual({ width: 1092, height: 410 })
+  expect(projectFolder('C:\\Users\\me\\work')).toBe('C--Users-me-work')
+  expect(isOwnWork('C:\\Users\\me\\AppData\\Local\\Temp/claude-image-preview/sess-1')).toBe(true)
+  const roots = await windowsTempRoots(['C:/T/', undefined, 'C:/T'], async () => ['claude', 'other', 'Claude-501'])
+  expect(roots).toEqual(['C:/T', 'C:/T/claude', 'C:/T/Claude-501'])
+})
+
+test('Windows: a pasted image is found in the temp folder and drawn', async ($, on) => {
+  const clock = mock.clock(on)
+  // A POSIX-absolute stand-in: the test engine runs on the developer's machine, where C:/ is relative.
+  const temp = '/c/Users/me/AppData/Local/Temp'
+  const pasteDir = `${temp}/claude/C--work/sess-1/images`
+  let draft = '[Image #1]'
+  const ran: { argv: string[]; env?: Record<string, string> }[] = []
+  const entry = { size: 0, mtimeMs: 0, isLink: false }
+  const env: Record<string, string> = { OS: 'Windows_NT', TEMP: temp, WT_SESSION: '1' }
+
+  on('session.start', () => ({ cwd: 'C:\\work' }))
+  on('command.register', () => ({ value: undefined }))
+  on('prompt.read', () => ({ value: { text: draft, cursor: draft.length } }))
+  on('session.id', () => ({ value: 'sess-1' }))
+  on('session.cwd', () => ({ value: 'C:\\work' }))
+  on('env.get', ($, e) => ({ value: env[e.name] }))
+  on('fs.write', () => ({ value: undefined }))
+  on('fs.exists', ($, e) => ({ value: e.path === `${temp}/claude/C--work/sess-1` }))
+  on('fs.list', ($, e) => ({
+    value:
+      e.path === temp
+        ? [{ name: 'claude', kind: 'dir', ...entry }, { name: 'npm-cache', kind: 'dir', ...entry }]
+        : e.path === pasteDir
+          ? [{ name: '1.png', kind: 'file', ...entry }]
+          : [],
+  }))
+  on('fs.stat', () => ({ value: { kind: 'file', size: 65_000, mtimeMs: 0, isLink: false } }))
+  on('fs.read', () => ({ value: { base64: toB64(bmp(64, 64)) } }))
+  on('process.run', ($, e) => {
+    ran.push({ argv: [...e.argv], env: e.init?.env })
+    const script = e.argv[0] === 'powershell.exe' ? scriptOf(e.argv) : ''
+    const stdout = script.includes('pixelWidth') ? 'pixelWidth: 232\r\npixelHeight: 232\r\n' : ''
+    return { value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+  })
+  on('ui.render', () => ({ type: 'Text', props: {}, children: ['engine band'] }))
+
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: 'C:\\work' })
+  await clock.advance(200)
+  await clock.advance(200)
+
+  // No uname, no sh: only PowerShell, with the pasted file as its input.
+  expect(ran.some(r => r.argv[0] === 'uname' || r.argv[0] === 'sh' || r.argv[0] === 'id')).toBe(false)
+  expect(ran.some(r => r.argv[0] === 'powershell.exe' && r.env?.IP_IN === `${pasteDir}/1.png`)).toBe(true)
+
+  const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(await ui.find({ type: 'Raster' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: '#1 · 232×232' })).toBeDefined()
+  await ui.unmount()
+  draft = ''
 })

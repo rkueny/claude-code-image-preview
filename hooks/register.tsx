@@ -6,22 +6,25 @@ import {
   EXT,
   JPEG_MAX_BYTES,
   JPEG_STEPS,
-  bmpArgv,
-  clipboardArgv,
+  bmpCmd,
+  clipboardCmd,
   copiesOf,
+  decodeBase64Cmd,
   isOwnWork,
   isPastedName,
   isPicture,
-  jpgArgv,
-  measureArgv,
+  jpgCmd,
+  measureCmd,
   mediaTypeOf,
   parseMeasure,
-  pngArgv,
+  pngCmd,
   projectFolder,
+  removeCmd,
   tempRoot,
-  writeBase64Argv,
+  trimDir,
+  windowsTempRoots,
 } from './host'
-import type { Host } from './host'
+import type { Cmd, Host } from './host'
 import { boxFor, cellsToBase64, decodeBmp, fitCells, fitRow, formatSize, fromBase64 } from './pixels'
 import type { GlyphSet, Pixels } from './pixels'
 
@@ -67,10 +70,10 @@ function isImageBlock(block: { type: string; [k: string]: unknown }): block is I
   return block.type === 'image' && source?.type === 'base64' && typeof source.data === 'string'
 }
 
-function run($: $, argv: string[] | null, stdin?: string) {
-  if (!argv) return Promise.resolve(null)
+function run($: $, cmd: Cmd | null) {
+  if (!cmd) return Promise.resolve(null)
 
-  return $.process.run(argv, { stdin, timeoutMs: 20_000 }).catch(() => null)
+  return $.process.run(cmd.argv, { env: cmd.env, timeoutMs: 20_000 }).catch(() => null)
 }
 
 // ---- the machine -------------------------------------------------------------
@@ -82,7 +85,7 @@ function ensureHost($: $): Promise<Host> {
     hostPending = null
     if (!found.tool && !hasWarned) {
       hasWarned = true
-      $.ui.toast('image-preview: no image converter found (needs sips on macOS, ImageMagick on Linux)')
+      $.ui.toast('image-preview: no image converter found (needs sips on macOS, ImageMagick on Linux, PowerShell on Windows)')
     }
 
     return found
@@ -91,49 +94,81 @@ function ensureHost($: $): Promise<Host> {
   return hostPending
 }
 
-async function detectHost($: $): Promise<Host> {
-  const uname = await run($, ['uname', '-s'])
+async function detectOs($: $): Promise<Host['os']> {
+  // Windows has no uname; it says so in OS.
+  if ((await $.env.get('OS')) === 'Windows_NT') return 'windows'
+  const uname = await run($, { argv: ['uname', '-s'] })
   const name = uname?.stdout.trim() ?? ''
-  const os = name === 'Darwin' ? 'darwin' : name === 'Linux' ? 'linux' : 'other'
 
+  return name === 'Darwin' ? 'darwin' : name === 'Linux' ? 'linux' : 'other'
+}
+
+async function detectHost($: $): Promise<Host> {
+  const os = await detectOs($)
   let tool: Host['tool'] = null
   if (os === 'darwin') {
     tool = 'sips'
+  } else if (os === 'windows') {
+    tool = 'gdi'
   } else if (os === 'linux') {
-    const found = await run($, ['sh', '-c', 'command -v magick || command -v convert'])
+    const found = await run($, { argv: ['sh', '-c', 'command -v magick || command -v convert'] })
     const path = found?.stdout.trim() ?? ''
     tool = path.endsWith('magick') ? 'magick' : path.endsWith('convert') ? 'convert' : null
   }
 
   const sessionId = await $.session.id()
-  const tmp = ((await $.env.get('TMPDIR')) || '/tmp').replace(/\/+$/, '')
-  const work = `${tmp}/claude-image-preview/${sessionId.replace(/[^\w-]/g, '_')}`
-  await run($, ['mkdir', '-p', work])
+  const tmp =
+    os === 'windows'
+      ? (await $.env.get('TEMP')) || (await $.env.get('TMP')) || `${(await $.env.get('LOCALAPPDATA')) ?? 'C:'}/Temp`
+      : (await $.env.get('TMPDIR')) || '/tmp'
+  const work = `${trimDir(tmp)}/claude-image-preview/${sessionId.replace(/[^\w-]/g, '_')}`
+  // Writing a file makes its folders: no mkdir to spell per system.
+  await $.fs.write(`${work}/.keep`, '').catch(() => undefined)
 
-  return { os, tool, work, pasteDir: await findPasteDir($, sessionId) }
+  return { os, tool, work, pasteDir: await findPasteDir($, os, sessionId) }
+}
+
+/** The folders Claude Code may keep its temp root in, most likely first. */
+async function tempRoots($: $, os: Host['os']): Promise<string[]> {
+  const configured = await $.env.get('CLAUDE_CODE_TMPDIR')
+  if (os !== 'windows') {
+    const uid = (await run($, { argv: ['id', '-u'] }))?.stdout.trim() || '0'
+
+    return [tempRoot(configured, uid)]
+  }
+  const scan = async (dir: string) =>
+    (await $.fs.list(dir).catch(() => [])).filter(e => e.kind === 'dir').map(e => e.name)
+  const local = await $.env.get('LOCALAPPDATA')
+
+  return windowsTempRoots(
+    [configured, await $.env.get('TEMP'), await $.env.get('TMP'), local && `${local}/Temp`, 'C:/tmp'],
+    scan,
+  )
 }
 
 /**
  * Claude Code writes each pasted image to
- * `<tmp>/claude-<uid>/<project>/<session>/images/<n>.<ext>` as it is pasted,
- * the project folder being the cwd with every non-alphanumeric turned into
- * `-`. When that folder is not there yet, the temp root is scanned for the
- * session; failing that, the guess is where it will land.
+ * `<temp root>/<project>/<session>/images/<n>.<ext>` as it is pasted, the
+ * project folder being the cwd with every non-alphanumeric turned into `-`.
+ * When that folder is not there yet, each root is scanned for the session;
+ * failing that, the first guess is where it will land.
  */
-async function findPasteDir($: $, sessionId: string): Promise<string> {
-  const uid = (await run($, ['id', '-u']))?.stdout.trim() || '0'
-  const root = tempRoot(await $.env.get('CLAUDE_CODE_TMPDIR'), uid)
-  const guess = `${root}/${projectFolder(await $.session.cwd())}/${sessionId}`
-  if (await $.fs.exists(guess).catch(() => false)) return `${guess}/images`
-
-  const entries = await $.fs.list(root).catch(() => [])
-  for (const entry of entries) {
-    if (entry.kind !== 'dir') continue
-    const dir = `${root}/${entry.name}/${sessionId}`
-    if (await $.fs.exists(dir).catch(() => false)) return `${dir}/images`
+async function findPasteDir($: $, os: Host['os'], sessionId: string): Promise<string> {
+  const roots = await tempRoots($, os)
+  const project = projectFolder(await $.session.cwd())
+  for (const root of roots) {
+    const guess = `${root}/${project}/${sessionId}`
+    if (await $.fs.exists(guess).catch(() => false)) return `${guess}/images`
+  }
+  for (const root of roots) {
+    for (const entry of await $.fs.list(root).catch(() => [])) {
+      if (entry.kind !== 'dir') continue
+      const dir = `${root}/${entry.name}/${sessionId}`
+      if (await $.fs.exists(dir).catch(() => false)) return `${dir}/images`
+    }
   }
 
-  return `${guess}/images`
+  return `${roots[0] ?? '/tmp'}/${project}/${sessionId}/images`
 }
 
 async function looksLikeKitty($: $) {
@@ -161,16 +196,16 @@ type Found = Pick<PastedImage, 'id' | 'n' | 'status' | 'file' | 'mediaType' | 'r
 /** Measures the picture, makes the renderers' copies and adds it to `images`. */
 async function ingest($: $, found: Found) {
   const h = await ensureHost($)
-  const measured = await run($, measureArgv(h.tool, found.file))
+  const measured = await run($, measureCmd(h.tool, found.file))
   const size = measured && parseMeasure(h.tool, measured.stdout)
   if (!size) return
 
   const at = await $.clock.now()
   const copies = copiesOf(`${h.work}/${found.id}-${at}`)
-  await run($, pngArgv(h.tool, found.file, copies.png, size.width, size.height))
-  await run($, bmpArgv(h.tool, found.file, copies.bmp, size.width, size.height))
+  await run($, pngCmd(h.tool, found.file, copies.png, size.width, size.height))
+  await run($, bmpCmd(h.tool, found.file, copies.bmp, size.width, size.height))
   for (const [side, quality] of JPEG_STEPS) {
-    await run($, jpgArgv(h.tool, found.file, copies.jpg, size.width, size.height, side, quality))
+    await run($, jpgCmd(h.tool, found.file, copies.jpg, size.width, size.height, side, quality))
     const stat = await $.fs.stat(copies.jpg).catch(() => null)
     if (stat && stat.size > 0 && stat.size < JPEG_MAX_BYTES) break
   }
@@ -205,7 +240,7 @@ async function captureDraft($: $, n: number, attempt = 0): Promise<void> {
     // Claude Code writes the file a moment after the paste: wait a little,
     // looking again for the session's folder in case it moved.
     if (attempt < 4) {
-      if (attempt === 1) h.pasteDir = await findPasteDir($, await $.session.id())
+      if (attempt === 1) h.pasteDir = await findPasteDir($, h.os, await $.session.id())
       isDone = false
       $.clock.after(250, () => void captureDraft($, n, attempt + 1))
 
@@ -213,7 +248,7 @@ async function captureDraft($: $, n: number, attempt = 0): Promise<void> {
     }
     // Never written (the store is off for this session): read the clipboard.
     const out = `${h.work}/clipboard-${n}-${await $.clock.now()}.png`
-    const done = await run($, clipboardArgv(h.os, out))
+    const done = await run($, clipboardCmd(h.os, out))
     if (done?.exitCode !== 0) return
     const said = done.stdout.trim()
     const file = said.startsWith('file:') ? said.slice('file:'.length) : out
@@ -262,7 +297,10 @@ async function ingestSent($: $, rowId: string, blocks: Sent[]) {
     const ext = EXT[block.source.media_type] ?? 'png'
     const id = `sent-${rowId.replace(/[^\w-]/g, '')}-${index}`
     const file = `${h.work}/${id}.${ext}`
-    const done = await run($, writeBase64Argv(file), block.source.data)
+    // The bytes cross as base64 text in a file: no stdin to pipe, on any system.
+    const b64 = `${file}.b64`
+    await $.fs.write(b64, block.source.data)
+    const done = await run($, decodeBase64Cmd(h.os, b64, file))
     if (done?.exitCode === 0) {
       await ingest($, { id, n, status: 'sent', file, mediaType: block.source.media_type, rowId })
     }
@@ -275,7 +313,7 @@ async function forgetAll($: $) {
   submittedNs = []
   lastTokens = ''
   await update($, images, () => [])
-  if (h && isOwnWork(h.work)) await run($, ['rm', '-rf', h.work])
+  if (h && isOwnWork(h.work)) await run($, removeCmd(h.os, h.work))
 }
 
 // ---- drawing -----------------------------------------------------------------
@@ -441,6 +479,12 @@ export const register: Register = (on, options) => {
 
   on('session.start', async ($, e, next) => {
     const started = await next(e)
+    // A new session (or a resume) may sit elsewhere: find everything again.
+    host = null
+    hostPending = null
+    lastTokens = ''
+    submittedNs = []
+    capturing.clear()
     await $.command.register({
       name: 'images',
       description: 'Show the images pasted in this session',

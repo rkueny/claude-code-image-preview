@@ -1,6 +1,6 @@
 {
   "name": "image-preview",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "See the images you paste into Claude Code, in any terminal: thumbnails above the prompt and a gallery of the session's images (/images).",
   "author": {
     "name": "Raphaël Kueny",
