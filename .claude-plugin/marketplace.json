@@ -1,0 +1,19 @@
+{
+  "name": "claude-code-image-preview",
+  "owner": {
+    "name": "Raphaël Kueny",
+    "url": "https://github.com/rkueny"
+  },
+  "plugins": [
+    {
+      "name": "image-preview",
+      "source": "./",
+      "description": "See the images you paste into Claude Code, in any terminal: thumbnails above the prompt and a gallery of the session's images",
+      "category": "productivity",
+      "tags": ["images", "paste", "preview", "thumbnails", "mod", "terminal"]
+    }
+  ],
+  "metadata": {
+    "description": "See the images you paste into Claude Code, in any terminal"
+  }
+}

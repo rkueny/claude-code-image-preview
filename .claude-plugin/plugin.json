@@ -1,0 +1,42 @@
+{
+  "name": "image-preview",
+  "version": "0.1.0",
+  "description": "See the images you paste into Claude Code, in any terminal: thumbnails above the prompt and a gallery of the session's images (/images).",
+  "author": {
+    "name": "Raphaël Kueny",
+    "url": "https://github.com/rkueny"
+  },
+  "homepage": "https://github.com/rkueny/claude-code-image-preview",
+  "license": "MIT",
+  "keywords": [
+    "images",
+    "paste",
+    "preview",
+    "thumbnails",
+    "mod",
+    "terminal",
+    "claude-code"
+  ],
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "renderer": {
+      "type": "string",
+      "title": "Terminal renderer",
+      "description": "auto: real pixels in kitty/Ghostty, half blocks in Terminal.app, block glyphs fitted to the picture elsewhere. kitty, glyphs, halfblocks: force one.",
+      "default": "auto",
+      "options": [
+        "auto",
+        "kitty",
+        "glyphs",
+        "halfblocks"
+      ]
+    },
+    "bandRows": {
+      "type": "number",
+      "title": "Thumbnail height above the prompt (rows)",
+      "description": "How many terminal rows a thumbnail takes in the band above the prompt.",
+      "default": 10
+    }
+  },
+  "repository": "https://github.com/rkueny/claude-code-image-preview"
+}
