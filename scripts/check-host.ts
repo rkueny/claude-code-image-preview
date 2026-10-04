@@ -94,9 +94,11 @@ const decoded = run(decodeBase64Cmd(os, b64, `${work}/sent.png`))
 const roundTrip = existsSync(`${work}/sent.png`) && readFileSync(`${work}/sent.png`).equals(original)
 check('base64 decodes to the same bytes', decoded.code === 0 && roundTrip && !existsSync(b64), decoded.stderr.trim())
 
-// CI has no picture on the clipboard: the script must say so (exit 1) without an error.
+// CI has no picture on the clipboard (and Linux runners no clipboard tool): any
+// non-zero exit is the mod's "no picture". Only a broken script fails here.
 const clip = run(clipboardCmd(os, `${work}/clipboard.png`))
-check('clipboard read runs', clip.code === 0 || (clip.code === 1 && !/exception|error/i.test(clip.stderr)), `exit ${clip.code} ${clip.stderr.trim()}`)
+const isBroken = /ParserError|is not recognized|CommandNotFound|syntax error/i.test(clip.stderr)
+check('clipboard read runs', !isBroken, `exit ${clip.code} ${clip.stderr.trim()}`)
 
 check('the work folder is recognized as ours', isOwnWork(work))
 const removed = run(removeCmd(os, work))
